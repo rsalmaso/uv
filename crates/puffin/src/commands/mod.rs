@@ -2,7 +2,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 pub(crate) use add::add;
-pub(crate) use clean::clean;
+pub(crate) use clean::{clean, prune};
 use distribution_types::InstalledMetadata;
 pub(crate) use freeze::freeze;
 pub(crate) use pip_compile::{extra_name_with_clap_error, pip_compile, Upgrade};

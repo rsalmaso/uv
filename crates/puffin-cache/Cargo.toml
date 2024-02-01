@@ -25,6 +25,7 @@ clap = { workspace = true, features = ["derive"], optional = true }
 directories = { workspace = true }
 fs-err = { workspace = true, features = ["tokio"] }
 nanoid = { workspace = true }
+rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 tracing = { workspace = true }

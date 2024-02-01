@@ -119,6 +119,65 @@ pub(crate) fn clean(
     Ok(ExitStatus::Success)
 }
 
+/// Run garbage collection on the cache.
+pub(crate) fn prune(cache: &Cache, mut printer: Printer) -> Result<ExitStatus> {
+    if !cache.root().exists() {
+        writeln!(
+            printer,
+            "No cache found at: {}",
+            cache.root().normalized_display().cyan()
+        )?;
+        return Ok(ExitStatus::Success);
+    }
+
+    writeln!(
+        printer,
+        "Pruning cache at: {}",
+        cache.root().normalized_display().cyan()
+    )?;
+
+    let summary = cache.prune().with_context(|| {
+        format!(
+            "Failed to prune cache at: {}",
+            cache.root().normalized_display()
+        )
+    })?;
+
+    // Write a summary of the number of files and directories removed.
+    match (summary.num_files, summary.num_dirs) {
+        (0, 0) => {
+            write!(printer, "No unused entries found")?;
+        }
+        (0, 1) => {
+            write!(printer, "Removed 1 directory")?;
+        }
+        (0, num_dirs_removed) => {
+            write!(printer, "Removed {num_dirs_removed} directories")?;
+        }
+        (1, _) => {
+            write!(printer, "Removed 1 file")?;
+        }
+        (num_files_removed, _) => {
+            write!(printer, "Removed {num_files_removed} files")?;
+        }
+    }
+
+    // If any, write a summary of the total byte count removed.
+    if summary.total_bytes > 0 {
+        let bytes = if summary.total_bytes < 1024 {
+            format!("{}B", summary.total_bytes)
+        } else {
+            let (bytes, unit) = human_readable_bytes(summary.total_bytes);
+            format!("{bytes:.1}{unit}")
+        };
+        write!(printer, " ({})", bytes.green())?;
+    }
+
+    writeln!(printer)?;
+
+    Ok(ExitStatus::Success)
+}
+
 /// Formats a number of bytes into a human readable SI-prefixed size.
 ///
 /// Returns a tuple of `(quantity, units)`.

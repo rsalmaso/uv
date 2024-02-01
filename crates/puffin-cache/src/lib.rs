@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fs_err as fs;
+use rustc_hash::FxHashSet;
 use tempfile::{tempdir, TempDir};
+use tracing::debug;
 
 use puffin_fs::directories;
 use puffin_normalize::PackageName;
@@ -254,15 +256,95 @@ impl Cache {
     /// Returns the number of entries removed from the cache.
     pub fn remove(&self, name: &PackageName) -> Result<Removal, io::Error> {
         let mut summary = Removal::default();
-        for bucket in [
-            CacheBucket::Wheels,
-            CacheBucket::BuiltWheels,
-            CacheBucket::Git,
-            CacheBucket::Interpreter,
-            CacheBucket::Simple,
-        ] {
+        for bucket in CacheBucket::iter() {
             summary += bucket.remove(self, name)?;
         }
+        Ok(summary)
+    }
+
+    /// Run the garbage collector on the cache, removing any dangling entries.
+    pub fn prune(&self) -> Result<Removal, io::Error> {
+        let mut summary = Removal::default();
+
+        // First, remove any top-level directories that are unused. These typically represent
+        // outdated cache buckets (e.g., `wheels-v0`, when latest is `wheels-v1`).
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+
+            if metadata.is_dir() {
+                // If the directory is not a cache bucket, remove it.
+                if !CacheBucket::iter().any(|bucket| entry.file_name() == bucket.to_str()) {
+                    let path = entry.path();
+                    debug!("Removing dangling cache entry {}", path.display());
+                    summary += rm_rf(path)?;
+                }
+            } else {
+                // If the file is not a marker file, remove it.
+                if entry.file_name() != "CACHEDIR.TAG" && entry.file_name() != ".gitignore" {
+                    let path = entry.path();
+                    debug!("Removing dangling cache entry {}", path.display());
+                    summary += rm_rf(path)?;
+                }
+            }
+        }
+
+        // Second, remove any unused source distributions.
+        let bucket = self.bucket(CacheBucket::BuiltWheels);
+        if bucket.is_dir() {
+            for entry in walkdir::WalkDir::new(self.bucket(CacheBucket::BuiltWheels)) {
+                let entry = entry?;
+                if entry.file_type().is_dir() {
+                    // Identify the manifest file. The presence of a manifest file indicates a
+                    // source distribution directory.
+                    if entry.path().join("manifest.msgpack").exists() {
+                        // Delete any entries older than the most recent directory. The most recent
+                        // directory represent the latest source distribution build; any older
+                        // directories are unused.
+                        if let Some(created) = fs::read_dir(entry.path())?
+                            .filter_map(Result::ok)
+                            .filter_map(|entry| entry.metadata().ok())
+                            .filter(std::fs::Metadata::is_dir)
+                            .filter_map(|metadata| metadata.created().ok())
+                            .max()
+                        {
+                            for entry in fs::read_dir(entry.path())? {
+                                let entry = entry?;
+                                if entry.metadata()?.created()? < created {
+                                    let path = entry.path();
+                                    debug!("Removing dangling cache entry {}", path.display());
+                                    summary += rm_rf(path)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Third, remove any unused archives (by searching for archives that are not symlinked).
+        let mut references = FxHashSet::default();
+        for bucket in CacheBucket::iter() {
+            let bucket = self.bucket(bucket);
+            if bucket.is_dir() {
+                for entry in walkdir::WalkDir::new(bucket).contents_first(true) {
+                    let entry = entry?;
+                    if entry.file_type().is_symlink() {
+                        references.insert(entry.path().canonicalize()?);
+                    }
+                }
+            }
+        }
+
+        for entry in fs::read_dir(self.bucket(CacheBucket::Archive))? {
+            let entry = entry?;
+            let path = entry.path().canonicalize()?;
+            if !references.contains(&path) {
+                debug!("Removing dangling cache entry {}", path.display());
+                summary += rm_rf(path)?;
+            }
+        }
+
         Ok(summary)
     }
 }
@@ -603,6 +685,21 @@ impl CacheBucket {
             }
         }
         Ok(summary)
+    }
+
+    /// Return an iterator over all cache buckets.
+    pub fn iter() -> impl Iterator<Item = CacheBucket> {
+        [
+            CacheBucket::Wheels,
+            CacheBucket::BuiltWheels,
+            CacheBucket::FlatIndex,
+            CacheBucket::Git,
+            CacheBucket::Interpreter,
+            CacheBucket::Simple,
+            CacheBucket::Archive,
+        ]
+        .iter()
+        .copied()
     }
 }
 

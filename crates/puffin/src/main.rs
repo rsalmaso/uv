@@ -108,8 +108,10 @@ enum Commands {
     /// Create a virtual environment.
     #[clap(alias = "virtualenv", alias = "v")]
     Venv(VenvArgs),
-    /// Clear the cache.
+    /// Clear the cache, removing all entries or those linked to specific packages.
     Clean(CleanArgs),
+    /// Prune all unreachable objects from the cache.
+    Prune,
     /// Add a dependency to the workspace.
     #[clap(hide = true)]
     Add(AddArgs),
@@ -857,6 +859,7 @@ async fn run() -> Result<ExitStatus> {
             command: PipCommand::Freeze(args),
         }) => commands::freeze(&cache, args.strict, printer),
         Commands::Clean(args) => commands::clean(&cache, &args.package, printer),
+        Commands::Prune => commands::prune(&cache, printer),
         Commands::Venv(args) => {
             let index_locations = IndexLocations::from_args(
                 args.index_url,
