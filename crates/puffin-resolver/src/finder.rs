@@ -154,8 +154,8 @@ impl<'a> DistFinder<'a> {
                     Some(version.clone()),
                     resolvable_dist
                         .compatible_wheel()
-                        .map(|(dist, tag_priority)| (dist.dist.clone(), *tag_priority)),
-                    resolvable_dist.source().map(|dist| dist.dist.clone()),
+                        .map(|(dist, tag_priority)| (dist.clone(), *tag_priority)),
+                    resolvable_dist.compatible_source().cloned(),
                 )
             } else {
                 (None, None, None)

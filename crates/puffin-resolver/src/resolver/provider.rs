@@ -16,6 +16,7 @@ use pypi_types::Metadata21;
 
 use crate::python_requirement::PythonRequirement;
 use crate::version_map::VersionMap;
+use crate::yanks::AllowedYanks;
 
 type PackageVersionsResult = Result<VersionsResponse, puffin_client::Error>;
 type WheelMetadataResult = Result<(Metadata21, Option<Url>), puffin_distribution::Error>;
@@ -73,6 +74,7 @@ pub struct DefaultResolverProviderInner {
     flat_index: FlatIndex,
     tags: Tags,
     python_requirement: PythonRequirement,
+    allowed_yanks: AllowedYanks,
     exclude_newer: Option<DateTime<Utc>>,
     no_binary: NoBinary,
 }
@@ -94,6 +96,7 @@ impl<'a, Context: BuildContext + Send + Sync> DefaultResolverProvider<'a, Contex
         flat_index: &'a FlatIndex,
         tags: &'a Tags,
         python_requirement: PythonRequirement,
+        allowed_yanks: AllowedYanks,
         exclude_newer: Option<DateTime<Utc>>,
         no_binary: &'a NoBinary,
     ) -> Self {
@@ -104,6 +107,7 @@ impl<'a, Context: BuildContext + Send + Sync> DefaultResolverProvider<'a, Contex
                 flat_index: flat_index.clone(),
                 tags: tags.clone(),
                 python_requirement,
+                allowed_yanks,
                 exclude_newer,
                 no_binary: no_binary.clone(),
             }),
@@ -134,6 +138,7 @@ impl<'a, Context: BuildContext + Send + Sync> ResolverProvider
                         &index,
                         &self_send.tags,
                         &self_send.python_requirement,
+                        &self_send.allowed_yanks,
                         self_send.exclude_newer.as_ref(),
                         self_send.flat_index.get(&package_name_owned).cloned(),
                         &self_send.no_binary,

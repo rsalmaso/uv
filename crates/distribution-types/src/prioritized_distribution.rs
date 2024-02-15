@@ -11,31 +11,41 @@ pub struct PrioritizedDist(Box<PrioritizedDistInner>);
 /// [`PrioritizedDist`] is boxed because [`Dist`] is large.
 #[derive(Debug, Default, Clone)]
 struct PrioritizedDistInner {
-    /// An arbitrary source distribution for the package version.
-    source: Option<DistMetadata>,
+    /// An arbitrary, compatible source distribution for the package version.
+    compatible_source: Option<Dist>,
     /// The highest-priority, installable wheel for the package version.
-    compatible_wheel: Option<(DistMetadata, TagPriority)>,
+    compatible_wheel: Option<(Dist, TagPriority)>,
     /// The most-relevant, incompatible wheel for the package version.
-    incompatible_wheel: Option<(DistMetadata, IncompatibleWheel)>,
+    incompatible_wheel: Option<(Dist, IncompatibleWheel)>,
+    /// An arbitrary, incompatible source distribution for the package version.
+    incompatible_source: Option<(Dist, IncompatibleSource)>,
     /// The hashes for each distribution.
     hashes: Vec<Hashes>,
-    /// If exclude newer filtered files from this distribution
-    exclude_newer: bool,
 }
 
 /// A distribution that can be used for both resolution and installation.
 #[derive(Debug, Clone)]
 pub enum CompatibleDist<'a> {
     /// The distribution should be resolved and installed using a source distribution.
-    SourceDist(&'a DistMetadata),
+    SourceDist(&'a Dist),
     /// The distribution should be resolved and installed using a wheel distribution.
-    CompatibleWheel(&'a DistMetadata, TagPriority),
+    CompatibleWheel(&'a Dist, TagPriority),
     /// The distribution should be resolved using an incompatible wheel distribution, but
     /// installed using a source distribution.
     IncompatibleWheel {
-        source_dist: &'a DistMetadata,
-        wheel: &'a DistMetadata,
+        source_dist: &'a Dist,
+        wheel: &'a Dist,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum IncompatibleDist {
+    /// An incompatible wheel is available.
+    Wheel(IncompatibleWheel),
+    /// An incompatible source distribution is available.
+    Source(IncompatibleSource),
+    /// No distributions are available
+    Unavailable,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,62 +54,47 @@ pub enum WheelCompatibility {
     Compatible(TagPriority),
 }
 
-#[derive(Debug, PartialEq, Eq, Ord, PartialOrd, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IncompatibleWheel {
+    ExcludeNewer(Option<i64>),
     Tag(IncompatibleTag),
-    RequiresPython,
+    RequiresPython(VersionSpecifiers),
+    Yanked(Yanked),
     NoBinary,
 }
 
-/// A [`Dist`] and metadata about it required for downstream filtering.
-#[derive(Debug, Clone)]
-pub struct DistMetadata {
-    /// The distribution.
-    pub dist: Dist,
-    /// The version of Python required by the distribution.
-    pub requires_python: Option<VersionSpecifiers>,
-    /// If the distribution file is yanked.
-    pub yanked: Yanked,
+#[derive(Debug, PartialEq, Eq)]
+pub enum SourceDistCompatibility {
+    Incompatible(IncompatibleSource),
+    Compatible,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum IncompatibleSource {
+    ExcludeNewer(Option<i64>),
+    RequiresPython(VersionSpecifiers),
+    Yanked(Yanked),
+    NoBuild,
 }
 
 impl PrioritizedDist {
     /// Create a new [`PrioritizedDist`] from the given wheel distribution.
-    pub fn from_built(
-        dist: Dist,
-        requires_python: Option<VersionSpecifiers>,
-        yanked: Yanked,
-        hash: Option<Hashes>,
-        compatibility: WheelCompatibility,
-    ) -> Self {
+    pub fn from_built(dist: Dist, hash: Option<Hashes>, compatibility: WheelCompatibility) -> Self {
         match compatibility {
             WheelCompatibility::Compatible(priority) => Self(Box::new(PrioritizedDistInner {
-                source: None,
-                compatible_wheel: Some((
-                    DistMetadata {
-                        dist,
-                        requires_python,
-                        yanked,
-                    },
-                    priority,
-                )),
+                compatible_source: None,
+                compatible_wheel: Some((dist, priority)),
                 incompatible_wheel: None,
+                incompatible_source: None,
                 hashes: hash.map(|hash| vec![hash]).unwrap_or_default(),
-                exclude_newer: false,
             })),
             WheelCompatibility::Incompatible(incompatibility) => {
                 Self(Box::new(PrioritizedDistInner {
-                    source: None,
+                    compatible_source: None,
                     compatible_wheel: None,
-                    incompatible_wheel: Some((
-                        DistMetadata {
-                            dist,
-                            requires_python,
-                            yanked,
-                        },
-                        incompatibility,
-                    )),
+                    incompatible_wheel: Some((dist, incompatibility)),
+                    incompatible_source: None,
                     hashes: hash.map(|hash| vec![hash]).unwrap_or_default(),
-                    exclude_newer: false,
                 }))
             }
         }
@@ -108,29 +103,33 @@ impl PrioritizedDist {
     /// Create a new [`PrioritizedDist`] from the given source distribution.
     pub fn from_source(
         dist: Dist,
-        requires_python: Option<VersionSpecifiers>,
-        yanked: Yanked,
         hash: Option<Hashes>,
+        compatibility: SourceDistCompatibility,
     ) -> Self {
-        Self(Box::new(PrioritizedDistInner {
-            source: Some(DistMetadata {
-                dist,
-                requires_python,
-                yanked,
-            }),
-            compatible_wheel: None,
-            incompatible_wheel: None,
-            hashes: hash.map(|hash| vec![hash]).unwrap_or_default(),
-            exclude_newer: false,
-        }))
+        match compatibility {
+            SourceDistCompatibility::Compatible => Self(Box::new(PrioritizedDistInner {
+                compatible_source: Some(dist),
+                incompatible_source: None,
+                compatible_wheel: None,
+                incompatible_wheel: None,
+                hashes: hash.map(|hash| vec![hash]).unwrap_or_default(),
+            })),
+            SourceDistCompatibility::Incompatible(incompatibility) => {
+                Self(Box::new(PrioritizedDistInner {
+                    compatible_source: None,
+                    incompatible_source: Some((dist, incompatibility)),
+                    compatible_wheel: None,
+                    incompatible_wheel: None,
+                    hashes: hash.map(|hash| vec![hash]).unwrap_or_default(),
+                }))
+            }
+        }
     }
 
     /// Insert the given built distribution into the [`PrioritizedDist`].
     pub fn insert_built(
         &mut self,
         dist: Dist,
-        requires_python: Option<VersionSpecifiers>,
-        yanked: Yanked,
         hash: Option<Hashes>,
         compatibility: WheelCompatibility,
     ) {
@@ -139,48 +138,20 @@ impl PrioritizedDist {
             WheelCompatibility::Compatible(priority) => {
                 if let Some((.., existing_priority)) = &self.0.compatible_wheel {
                     if priority > *existing_priority {
-                        self.0.compatible_wheel = Some((
-                            DistMetadata {
-                                dist,
-                                requires_python,
-                                yanked,
-                            },
-                            priority,
-                        ));
+                        self.0.compatible_wheel = Some((dist, priority));
                     }
                 } else {
-                    self.0.compatible_wheel = Some((
-                        DistMetadata {
-                            dist,
-                            requires_python,
-                            yanked,
-                        },
-                        priority,
-                    ));
+                    self.0.compatible_wheel = Some((dist, priority));
                 }
             }
             // Track the most relevant incompatible wheel
             WheelCompatibility::Incompatible(incompatibility) => {
                 if let Some((.., existing_incompatibility)) = &self.0.incompatible_wheel {
-                    if incompatibility > *existing_incompatibility {
-                        self.0.incompatible_wheel = Some((
-                            DistMetadata {
-                                dist,
-                                requires_python,
-                                yanked,
-                            },
-                            incompatibility,
-                        ));
+                    if incompatibility.is_more_compatible(existing_incompatibility) {
+                        self.0.incompatible_wheel = Some((dist, incompatibility));
                     }
                 } else {
-                    self.0.incompatible_wheel = Some((
-                        DistMetadata {
-                            dist,
-                            requires_python,
-                            yanked,
-                        },
-                        incompatibility,
-                    ));
+                    self.0.incompatible_wheel = Some((dist, incompatibility));
                 }
             }
         }
@@ -194,16 +165,24 @@ impl PrioritizedDist {
     pub fn insert_source(
         &mut self,
         dist: Dist,
-        requires_python: Option<VersionSpecifiers>,
-        yanked: Yanked,
         hash: Option<Hashes>,
+        compatibility: SourceDistCompatibility,
     ) {
-        if self.0.source.is_none() {
-            self.0.source = Some(DistMetadata {
-                dist,
-                requires_python,
-                yanked,
-            });
+        match compatibility {
+            SourceDistCompatibility::Compatible => {
+                if self.0.compatible_source.is_none() {
+                    self.0.compatible_source = Some(dist);
+                }
+            }
+            SourceDistCompatibility::Incompatible(incompatibility) => {
+                if let Some((.., existing_incompatibility)) = &self.0.incompatible_source {
+                    if incompatibility.is_more_compatible(existing_incompatibility) {
+                        self.0.incompatible_source = Some((dist, incompatibility));
+                    }
+                } else {
+                    self.0.incompatible_source = Some((dist, incompatibility));
+                }
+            }
         }
 
         if let Some(hash) = hash {
@@ -215,7 +194,7 @@ impl PrioritizedDist {
     pub fn get(&self) -> Option<CompatibleDist> {
         match (
             &self.0.compatible_wheel,
-            &self.0.source,
+            &self.0.compatible_source,
             &self.0.incompatible_wheel,
         ) {
             // Prefer the highest-priority, platform-compatible wheel.
@@ -236,28 +215,23 @@ impl PrioritizedDist {
     }
 
     /// Return the source distribution, if any.
-    pub fn source(&self) -> Option<&DistMetadata> {
-        self.0.source.as_ref()
+    pub fn compatible_source(&self) -> Option<&Dist> {
+        self.0.compatible_source.as_ref()
+    }
+
+    /// Return the incompatible source distribution, if any.
+    pub fn incompatible_source(&self) -> Option<&(Dist, IncompatibleSource)> {
+        self.0.incompatible_source.as_ref()
     }
 
     /// Return the compatible built distribution, if any.
-    pub fn compatible_wheel(&self) -> Option<&(DistMetadata, TagPriority)> {
+    pub fn compatible_wheel(&self) -> Option<&(Dist, TagPriority)> {
         self.0.compatible_wheel.as_ref()
     }
 
     /// Return the incompatible built distribution, if any.
-    pub fn incompatible_wheel(&self) -> Option<&(DistMetadata, IncompatibleWheel)> {
+    pub fn incompatible_wheel(&self) -> Option<&(Dist, IncompatibleWheel)> {
         self.0.incompatible_wheel.as_ref()
-    }
-
-    /// Set the `exclude_newer` flag
-    pub fn set_exclude_newer(&mut self) {
-        self.0.exclude_newer = true;
-    }
-
-    /// Check if any distributions were excluded by the `exclude_newer` option
-    pub fn exclude_newer(&self) -> bool {
-        self.0.exclude_newer
     }
 
     /// Return the hashes for each distribution.
@@ -268,15 +242,16 @@ impl PrioritizedDist {
     /// Returns true if and only if this distribution does not contain any
     /// source distributions or wheels.
     pub fn is_empty(&self) -> bool {
-        self.0.source.is_none()
+        self.0.compatible_source.is_none()
+            && self.0.incompatible_source.is_none()
             && self.0.compatible_wheel.is_none()
             && self.0.incompatible_wheel.is_none()
     }
 }
 
 impl<'a> CompatibleDist<'a> {
-    /// Return the [`DistMetadata`] to use during resolution.
-    pub fn for_resolution(&self) -> &DistMetadata {
+    /// Return the [`Dist`] to use during resolution.
+    pub fn for_resolution(&self) -> &Dist {
         match *self {
             CompatibleDist::SourceDist(sdist) => sdist,
             CompatibleDist::CompatibleWheel(wheel, _) => wheel,
@@ -287,8 +262,8 @@ impl<'a> CompatibleDist<'a> {
         }
     }
 
-    /// Return the [`DistMetadata`] to use during installation.
-    pub fn for_installation(&self) -> &DistMetadata {
+    /// Return the [`Dist`] to use during installation.
+    pub fn for_installation(&self) -> &Dist {
         match *self {
             CompatibleDist::SourceDist(sdist) => sdist,
             CompatibleDist::CompatibleWheel(wheel, _) => wheel,
@@ -297,36 +272,6 @@ impl<'a> CompatibleDist<'a> {
                 wheel: _,
             } => source_dist,
         }
-    }
-
-    /// Return the [`Yanked`] status of the distribution.
-    ///
-    /// It is possible for files to have a different yank status per PEP 592 but in the official
-    /// PyPI warehouse this cannot happen.
-    ///
-    /// Here, we will treat the distribution is yanked if the file we will install with
-    /// is yanked.
-    ///
-    /// PEP 592: <https://peps.python.org/pep-0592/#warehouse-pypi-implementation-notes>
-    pub fn yanked(&self) -> &Yanked {
-        &self.for_installation().yanked
-    }
-}
-
-impl Ord for WheelCompatibility {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Compatible(p_self), Self::Compatible(p_other)) => p_self.cmp(p_other),
-            (Self::Incompatible(_), Self::Compatible(_)) => std::cmp::Ordering::Less,
-            (Self::Compatible(_), Self::Incompatible(_)) => std::cmp::Ordering::Greater,
-            (Self::Incompatible(t_self), Self::Incompatible(t_other)) => t_self.cmp(t_other),
-        }
-    }
-}
-
-impl PartialOrd for WheelCompatibility {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(WheelCompatibility::cmp(self, other))
     }
 }
 
@@ -343,6 +288,67 @@ impl From<TagCompatibility> for WheelCompatibility {
             TagCompatibility::Incompatible(tag) => {
                 WheelCompatibility::Incompatible(IncompatibleWheel::Tag(tag))
             }
+        }
+    }
+}
+
+impl IncompatibleSource {
+    fn is_more_compatible(&self, other: &IncompatibleSource) -> bool {
+        match self {
+            Self::ExcludeNewer(timestamp_self) => match other {
+                // Smaller timestamps are closer to the cut-off time
+                Self::ExcludeNewer(timestamp_other) => timestamp_other < timestamp_self,
+                Self::NoBuild | Self::RequiresPython(_) | Self::Yanked(_) => true,
+            },
+            Self::RequiresPython(_) => match other {
+                Self::ExcludeNewer(_) => false,
+                // Version specifiers cannot be reasonably compared
+                Self::RequiresPython(_) => false,
+                Self::NoBuild | Self::Yanked(_) => true,
+            },
+            Self::Yanked(_) => match other {
+                Self::ExcludeNewer(_) | Self::RequiresPython(_) => false,
+                // Yanks with a reason are more helpful for errors
+                Self::Yanked(yanked_other) => matches!(yanked_other, Yanked::Reason(_)),
+                Self::NoBuild => true,
+            },
+            Self::NoBuild => false,
+        }
+    }
+}
+
+impl IncompatibleWheel {
+    fn is_more_compatible(&self, other: &IncompatibleWheel) -> bool {
+        match self {
+            Self::ExcludeNewer(timestamp_self) => match other {
+                // Smaller timestamps are closer to the cut-off time
+                Self::ExcludeNewer(timestamp_other) => match (timestamp_self, timestamp_other) {
+                    (None, _) => true,
+                    (_, None) => false,
+                    (Some(timestamp_self), Some(timestamp_other)) => {
+                        timestamp_other < timestamp_self
+                    }
+                },
+                Self::NoBinary | Self::RequiresPython(_) | Self::Tag(_) | Self::Yanked(_) => true,
+            },
+            Self::Tag(tag_self) => match other {
+                Self::ExcludeNewer(_) => false,
+                Self::Tag(tag_other) => tag_other > tag_self,
+                Self::NoBinary | Self::RequiresPython(_) | Self::Yanked(_) => true,
+            },
+            Self::RequiresPython(_) => match other {
+                Self::ExcludeNewer(_) | Self::Tag(_) => false,
+                // Version specifiers cannot be reasonably compared
+                Self::RequiresPython(_) => false,
+                Self::NoBinary | Self::Yanked(_) => true,
+            },
+            Self::Yanked(_) => match other {
+                Self::ExcludeNewer(_) | Self::Tag(_) | Self::RequiresPython(_) => false,
+                // Yanks with a reason are more helpful for errors
+                Self::Yanked(yanked_other) => matches!(yanked_other, Yanked::Reason(_)),
+                Self::NoBinary => true,
+            },
+            Self::NoBinary => false,
         }
     }
 }

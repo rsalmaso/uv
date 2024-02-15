@@ -11,13 +11,13 @@ use url::Url;
 use distribution_filename::DistFilename;
 use distribution_types::{
     BuiltDist, Dist, File, FileLocation, FlatIndexLocation, IndexUrl, PrioritizedDist,
-    RegistryBuiltDist, RegistrySourceDist, SourceDist,
+    RegistryBuiltDist, RegistrySourceDist, SourceDist, SourceDistCompatibility,
 };
 use pep440_rs::Version;
 use platform_tags::Tags;
 use puffin_cache::{Cache, CacheBucket};
 use puffin_normalize::PackageName;
-use pypi_types::{Hashes, Yanked};
+use pypi_types::Hashes;
 
 use crate::cached_client::{CacheControl, CachedClientError};
 use crate::html::SimpleHtml;
@@ -298,19 +298,13 @@ impl FlatIndex {
                 }));
                 match distributions.0.entry(version) {
                     Entry::Occupied(mut entry) => {
-                        entry.get_mut().insert_built(
-                            dist,
-                            None,
-                            Yanked::default(),
-                            None,
-                            compatibility.into(),
-                        );
+                        entry
+                            .get_mut()
+                            .insert_built(dist, None, compatibility.into());
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(PrioritizedDist::from_built(
                             dist,
-                            None,
-                            Yanked::default(),
                             None,
                             compatibility.into(),
                         ));
@@ -325,16 +319,17 @@ impl FlatIndex {
                 }));
                 match distributions.0.entry(filename.version.clone()) {
                     Entry::Occupied(mut entry) => {
-                        entry
-                            .get_mut()
-                            .insert_source(dist, None, Yanked::default(), None);
+                        entry.get_mut().insert_source(
+                            dist,
+                            None,
+                            SourceDistCompatibility::Compatible,
+                        );
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(PrioritizedDist::from_source(
                             dist,
                             None,
-                            Yanked::default(),
-                            None,
+                            SourceDistCompatibility::Compatible,
                         ));
                     }
                 }
