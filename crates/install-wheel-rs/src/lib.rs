@@ -11,17 +11,17 @@ use zip::result::ZipError;
 use zip::ZipArchive;
 
 use distribution_filename::WheelFilename;
-pub use install_location::InstallLocation;
 use pep440_rs::Version;
 use platform_host::{Arch, Os};
+pub use target::Target;
 pub use uninstall::{uninstall_wheel, Uninstall};
 use uv_fs::Normalized;
 use uv_normalize::PackageName;
 
-mod install_location;
 pub mod linker;
 mod record;
 mod script;
+mod target;
 mod uninstall;
 mod wheel;
 

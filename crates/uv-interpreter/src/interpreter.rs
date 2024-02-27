@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
 
 use cache_key::digest;
+use install_wheel_rs::Target;
 use pep440_rs::Version;
 use pep508_rs::MarkerEnvironment;
 use platform_host::Platform;
@@ -24,12 +25,13 @@ use crate::{find_requested_python, Error, PythonVersion};
 /// A Python executable and its associated platform markers.
 #[derive(Debug, Clone)]
 pub struct Interpreter {
-    pub(crate) platform: Platform,
-    pub(crate) markers: Box<MarkerEnvironment>,
-    pub(crate) sysconfig: Sysconfig,
-    pub(crate) base_exec_prefix: PathBuf,
-    pub(crate) base_prefix: PathBuf,
-    pub(crate) sys_executable: PathBuf,
+    platform: PythonPlatform,
+    markers: Box<MarkerEnvironment>,
+    sysconfig: Sysconfig,
+    prefix: PathBuf,
+    base_exec_prefix: PathBuf,
+    base_prefix: PathBuf,
+    sys_executable: PathBuf,
     tags: OnceCell<Tags>,
 }
 
@@ -49,9 +51,10 @@ impl Interpreter {
         );
 
         Ok(Self {
-            platform,
+            platform: PythonPlatform(platform),
             markers: Box::new(info.markers),
             sysconfig: info.sysconfig,
+            prefix: info.prefix,
             base_exec_prefix: info.base_exec_prefix,
             base_prefix: info.base_prefix,
             sys_executable: info.sys_executable,
@@ -62,18 +65,17 @@ impl Interpreter {
     // TODO(konstin): Find a better way mocking the fields
     pub fn artificial(platform: Platform, markers: MarkerEnvironment) -> Self {
         Self {
-            platform,
+            platform: PythonPlatform(platform),
             markers: Box::new(markers),
             sysconfig: Sysconfig {
-                stdlib: PathBuf::from("/dev/null"),
-                platstdlib: PathBuf::from("/dev/null"),
                 purelib: PathBuf::from("/dev/null"),
                 platlib: PathBuf::from("/dev/null"),
-                include: PathBuf::from("/dev/null"),
-                platinclude: PathBuf::from("/dev/null"),
                 scripts: PathBuf::from("/dev/null"),
                 data: PathBuf::from("/dev/null"),
+                include: PathBuf::from("/dev/null"),
+                stdlib: PathBuf::from("/dev/null"),
             },
+            prefix: PathBuf::from("/dev/null"),
             base_exec_prefix: PathBuf::from("/dev/null"),
             base_prefix: PathBuf::from("/dev/null"),
             sys_executable: PathBuf::from("/dev/null"),
@@ -81,11 +83,29 @@ impl Interpreter {
         }
     }
 
-    /// Return a new [`Interpreter`] with the given base prefix.
+    /// Return a new [`Interpreter`] with the given virtual environment root.
     #[must_use]
-    pub(crate) fn with_base_prefix(self, base_prefix: PathBuf) -> Self {
+    pub(crate) fn with_venv_root(self, venv_root: PathBuf) -> Self {
         Self {
-            base_prefix,
+            // Given that we know `venv_root` is a virtualenv, and not an arbitrary Python
+            // interpreter, we can safely assume that the platform is the same as the host
+            // platform. Further, we can safely assume that the paths follow a predictable
+            // structure, which allows us to avoid querying the interpreter for the `sysconfig`
+            // paths.
+            sysconfig: Sysconfig {
+                purelib: self
+                    .platform
+                    .venv_site_packages(&venv_root, self.python_tuple()),
+                platlib: self
+                    .platform
+                    .venv_site_packages(&venv_root, self.python_tuple()),
+                scripts: self.platform.venv_scripts_dir(&venv_root),
+                data: self.platform.venv_data_dir(&venv_root),
+                include: self.sysconfig.include,
+                stdlib: self.sysconfig.stdlib,
+            },
+            sys_executable: self.platform.venv_python(&venv_root),
+            prefix: venv_root,
             ..self
         }
     }
@@ -286,14 +306,17 @@ impl Interpreter {
         (self.implementation_major(), self.implementation_minor())
     }
 
+    /// Returns the implementation name (e.g., `CPython` or `PyPy`).
     pub fn implementation_name(&self) -> &str {
         &self.markers.implementation_name
     }
 
+    /// Return the `sys.base_exec_prefix` path for this Python interpreter.
     pub fn base_exec_prefix(&self) -> &Path {
         &self.base_exec_prefix
     }
 
+    /// Return the `sys.base_prefix` path for this Python interpreter.
     pub fn base_prefix(&self) -> &Path {
         &self.base_prefix
     }
@@ -301,16 +324,6 @@ impl Interpreter {
     /// Return the `sys.executable` path for this Python interpreter.
     pub fn sys_executable(&self) -> &Path {
         &self.sys_executable
-    }
-
-    /// Return the `stdlib` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
-    pub fn stdlib(&self) -> &Path {
-        &self.sysconfig.stdlib
-    }
-
-    /// Return the `platstdlib` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
-    pub fn platstdlib(&self) -> &Path {
-        &self.sysconfig.platstdlib
     }
 
     /// Return the `purelib` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
@@ -323,16 +336,6 @@ impl Interpreter {
         &self.sysconfig.platlib
     }
 
-    /// Return the `include` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
-    pub fn include(&self) -> &Path {
-        &self.sysconfig.include
-    }
-
-    /// Return the `platinclude` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
-    pub fn platinclude(&self) -> &Path {
-        &self.sysconfig.platinclude
-    }
-
     /// Return the `scripts` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
     pub fn scripts(&self) -> &Path {
         &self.sysconfig.scripts
@@ -342,30 +345,64 @@ impl Interpreter {
     pub fn data(&self) -> &Path {
         &self.sysconfig.data
     }
+
+    /// Return the `include` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
+    pub fn include(&self) -> &Path {
+        &self.sysconfig.include
+    }
+
+    /// Return the `stdlib` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
+    pub fn stdlib(&self) -> &Path {
+        &self.sysconfig.stdlib
+    }
+
+    /// Return the [`Target`] environment used to install wheels into this interpreter.
+    pub fn target(&self) -> Target {
+        Target {
+            python_version: self.python_tuple(),
+            sys_executable: self.sys_executable().to_path_buf(),
+            purelib: self.purelib().to_path_buf(),
+            platlib: self.platlib().to_path_buf(),
+            scripts: self.scripts().to_path_buf(),
+            data: self.data().to_path_buf(),
+            // Detect if this is a PEP 405-compliant virtual environment.
+            // See: https://github.com/pypa/pip/blob/0ad4c94be74cc24874c6feb5bb3c2152c398a18e/src/pip/_internal/utils/virtualenv.py#L14.
+            include: if self.prefix == self.base_prefix {
+                // If the interpreter is a venv, then the `include` directory has a different structure.
+                // See: https://github.com/pypa/pip/blob/0ad4c94be74cc24874c6feb5bb3c2152c398a18e/src/pip/_internal/locations/_sysconfig.py#L172
+                self.prefix.join("include").join("site").join(format!(
+                    "python{}.{}",
+                    self.python_major(),
+                    self.python_minor()
+                ))
+            } else {
+                self.include().to_path_buf()
+            },
+        }
+    }
 }
 
 /// The installation paths returned by `sysconfig.get_paths()`.
 ///
 /// See: <https://docs.python.org/3.12/library/sysconfig.html#installation-paths>
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub(crate) struct Sysconfig {
-    pub(crate) stdlib: PathBuf,
-    pub(crate) platstdlib: PathBuf,
-    pub(crate) purelib: PathBuf,
-    pub(crate) platlib: PathBuf,
-    pub(crate) include: PathBuf,
-    pub(crate) platinclude: PathBuf,
-    pub(crate) scripts: PathBuf,
-    pub(crate) data: PathBuf,
+struct Sysconfig {
+    stdlib: PathBuf,
+    purelib: PathBuf,
+    platlib: PathBuf,
+    include: PathBuf,
+    scripts: PathBuf,
+    data: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub(crate) struct InterpreterInfo {
-    pub(crate) markers: MarkerEnvironment,
-    pub(crate) sysconfig: Sysconfig,
-    pub(crate) base_exec_prefix: PathBuf,
-    pub(crate) base_prefix: PathBuf,
-    pub(crate) sys_executable: PathBuf,
+struct InterpreterInfo {
+    markers: MarkerEnvironment,
+    sysconfig: Sysconfig,
+    prefix: PathBuf,
+    base_exec_prefix: PathBuf,
+    base_prefix: PathBuf,
+    sys_executable: PathBuf,
 }
 
 impl InterpreterInfo {
@@ -559,8 +596,16 @@ mod tests {
                 },
                 "base_exec_prefix": "/home/ferris/.pyenv/versions/3.12.0",
                 "base_prefix": "/home/ferris/.pyenv/versions/3.12.0",
-                "stdlib": "/usr/lib/python3.12",
-                "sys_executable": "/home/ferris/projects/uv/.venv/bin/python"
+                "prefix": "/home/ferris/projects/uv/.venv",
+                "sys_executable": "/home/ferris/projects/uv/.venv/bin/python",
+                "sysconfig": {
+                    "data": "/home/ferris/.pyenv/versions/3.12.0",
+                    "include": "/home/ferris/.pyenv/versions/3.12.0/include",
+                    "platlib": "/home/ferris/.pyenv/versions/3.12.0/lib/python3.12/site-packages",
+                    "purelib": "/home/ferris/.pyenv/versions/3.12.0/lib/python3.12/site-packages",
+                    "scripts": "/home/ferris/.pyenv/versions/3.12.0/bin",
+                    "stdlib": "/home/ferris/.pyenv/versions/3.12.0/lib/python3.12"
+                }
             }
         "##};
 
